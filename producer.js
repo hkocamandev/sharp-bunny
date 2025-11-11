@@ -8,7 +8,8 @@ const QUEUE = "image_jobs";
 
 let channel;
 
-// RabbitMQ bağlantısı
+app.use(express.static("public"));
+
 async function connectQueue() {
   const connection = await amqp.connect("amqp://localhost");
   channel = await connection.createChannel();
@@ -17,13 +18,11 @@ async function connectQueue() {
 }
 connectQueue();
 
-// Çoklu dosya yükleme endpoint’i
+// multiple images upload endpoint
 app.post("/upload", upload.array("images", 10), async (req, res) => {
   const files = req.files;
-
-  if (!files || files.length === 0) {
+  if (!files || files.length === 0)
     return res.status(400).json({ error: "No files uploaded." });
-  }
 
   files.forEach((file) => {
     const job = { path: file.path };
@@ -31,9 +30,7 @@ app.post("/upload", upload.array("images", 10), async (req, res) => {
     console.log("📤 Sent to queue:", file.path);
   });
 
-  res.json({
-    message: `${files.length} image(s) queued for processing.`,
-  });
+  res.json({ message: `${files.length} image(s) queued for processing.` });
 });
 
-app.listen(3000, () => console.log("🚀 API running on http://localhost:3000"));
+app.listen(3000, () => console.log("🚀 Server running on http://localhost:3000"));

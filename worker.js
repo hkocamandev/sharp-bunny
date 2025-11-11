@@ -10,23 +10,20 @@ async function startWorker() {
   const channel = await connection.createChannel();
   await channel.assertQueue(QUEUE);
 
-  console.log("👂 Worker listening for jobs...");
+  console.log("👂 Worker started and waiting for messages...");
 
   channel.consume(QUEUE, async (msg) => {
-    if (msg !== null) {
+    if (msg) {
       const { path: imagePath } = JSON.parse(msg.content.toString());
       const filename = path.basename(imagePath);
       const outputPath = `processed/${filename}.jpg`;
 
       try {
-        await sharp(imagePath)
-          .resize(800) // 800px 
-          .toFile(outputPath);
-
-        console.log(` Processed: ${outputPath}`);
-        channel.ack(msg); // remove the message from the queue
+        await sharp(imagePath).resize(800).toFile(outputPath);
+        console.log(`✅ Processed: ${filename}`);
+        channel.ack(msg);
       } catch (err) {
-        console.error("Error processing image:", err);
+        console.error("❌ Error processing image:", err);
       }
     }
   });

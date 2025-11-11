@@ -16,5 +16,10 @@ yarn-error.log*
 .vscode/
 .idea/
 
-uploads/
-processed/
+# Ignore all files inside these folders
+uploads/*
+processed/*
+
+# But keep the folders themselves (and the .gitkeep marker)
+!uploads/.gitkeep
+!processed/.gitkeep

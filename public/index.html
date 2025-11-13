@@ -2,84 +2,78 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Image Upload</title>
+  <title>Image Upload with Workers</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f5f5f5;
-      padding: 40px;
-    }
-    h1 {
-      color: #333;
-    }
-    form {
-      background: #fff;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.1);
-      max-width: 400px;
-      margin: auto;
-    }
-    input[type="file"] {
-      margin: 10px 0;
-    }
-    button {
-      background: #007bff;
-      color: white;
-      border: none;
-      padding: 10px 15px;
-      border-radius: 5px;
-      cursor: pointer;
-    }
-    button:hover {
-      background: #0056b3;
-    }
-    #message {
-      text-align: center;
-      margin-top: 20px;
-      font-weight: bold;
-    }
+    body { font-family: Arial; background: #f5f5f5; padding: 30px; }
+    h1 { color: #333; }
+    form { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); max-width: 400px; margin-bottom: 30px; }
+    button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; }
+    #message { margin-top: 10px; font-weight: bold; }
+    #gallery img { width: 120px; margin: 5px; border-radius: 5px; box-shadow: 0 0 5px rgba(0,0,0,0.2); }
+    #logs { background: #fff; padding: 10px; border-radius: 8px; max-width: 600px; box-shadow: 0 0 5px rgba(0,0,0,0.1); }
+    .log-item { margin: 5px 0; }
   </style>
 </head>
 <body>
-  <h1>Upload Images</h1>
-  <form id="uploadForm">
-    <input type="file" name="images" id="images" multiple accept="image/*" required>
-    <br>
-    <button type="submit">Upload</button>
-  </form>
+  <h1>Image Processor Demo</h1>
+
+<form id="uploadForm" onsubmit="return false;">
+  <input type="file" id="images" name="images" multiple accept="image/*" required>
+  <br><br>
+  <button type="button" id="uploadBtn">Upload</button>
+</form>
+
 
   <div id="message"></div>
+
+  <h2>Processed Images</h2>
+  <div id="gallery"></div>
+
+  <h2>Worker Logs</h2>
+  <div id="logs"></div>
 
   <script>
     const form = document.getElementById('uploadForm');
     const message = document.getElementById('message');
+    const gallery = document.getElementById('gallery');
+    const logsDiv = document.getElementById('logs');
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const files = document.getElementById('images').files;
-      if (files.length === 0) {
-        message.textContent = "Please select at least one image.";
-        return;
-      }
 
-      const formData = new FormData();
-      for (let file of files) {
-        formData.append('images', file);
-      }
+document.getElementById('uploadBtn').addEventListener('click', async () => {
+  const files = document.getElementById('images').files;
+  if (!files.length) return alert("Select at least one file!");
 
-      message.textContent = "Uploading...";
-      try {
-        const res = await fetch('/upload', {
-          method: 'POST',
-          body: formData
-        });
-        const data = await res.json();
-        message.textContent = data.message || "Upload complete!";
-      } catch (err) {
-        message.textContent = "❌ Error uploading files.";
-      }
-    });
+  const formData = new FormData();
+  for (let f of files) formData.append('images', f);
+  message.textContent = "Uploading...";
+const res = await fetch('/upload', { method: 'POST', body: formData });
+  const data = await res.json();
+  message.textContent = data.message; 
+});
+
+
+    async function loadGallery() {
+      const res = await fetch('/processed');
+      const images = await res.json();
+      gallery.innerHTML = images.map(src => `<img src="${src}" alt="">`).join("");
+    }
+
+    async function loadLogs() {
+      const res = await fetch('/logs');
+      const logs = await res.json();
+      logsDiv.innerHTML = logs
+        .slice(-20) // only last 20 logs
+        .map(l => `<div class="log-item">👷 Worker <b>${l.worker}</b> → ${l.filename} <small>(${new Date(l.timestamp).toLocaleTimeString()})</small></div>`)
+        .join("");
+    }
+
+    setInterval(() => {
+      loadGallery();
+      loadLogs();
+    }, 5000);
+
+    loadGallery();
+    loadLogs();
   </script>
 </body>
 </html>

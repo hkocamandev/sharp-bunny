@@ -58,14 +58,24 @@ const res = await fetch('/upload', { method: 'POST', body: formData });
       gallery.innerHTML = images.map(src => `<img src="${src}" alt="">`).join("");
     }
 
-    async function loadLogs() {
-      const res = await fetch('/logs');
-      const logs = await res.json();
-      logsDiv.innerHTML = logs
-        .slice(-20) // only last 20 logs
-        .map(l => `<div class="log-item">👷 Worker <b>${l.worker}</b> → ${l.filename} <small>(${new Date(l.timestamp).toLocaleTimeString()})</small></div>`)
-        .join("");
-    }
+async function loadLogs() {
+  const res = await fetch('/logs');
+  const logs = await res.json();
+  logsDiv.innerHTML = logs
+    .slice(-30)
+    .map(l => {
+      const color = l.status === 'success' ? 'green' : 'red';
+      const emoji = l.status === 'success' ? '✅' : '❌';
+      return `<div class="log-item" style="color:${color}">
+        ${emoji} <b>${l.filename}</b> (${l.status.toUpperCase()}${l.retries ? ` - retry ${l.retries}` : ''})
+        by Worker <b>${l.worker}</b>
+        ${l.duration ? `in ${l.duration}s` : ''}
+        <small>(${new Date(l.timestamp).toLocaleTimeString()})</small>
+      </div>`;
+    })
+    .join("");
+}
+
 
     setInterval(() => {
       loadGallery();

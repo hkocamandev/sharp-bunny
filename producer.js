@@ -43,7 +43,9 @@ app.post("/upload", (req, res) => {
       return res.status(400).json({ message: "No files uploaded." });
 
     files.forEach((file) => {
-      const job = { path: file.path };
+      const job = { path: file.path,
+        originalName: file.originalname
+      };
       channel.sendToQueue(QUEUE, Buffer.from(JSON.stringify(job)));
       console.log("Sent to queue:", file.path);
     });

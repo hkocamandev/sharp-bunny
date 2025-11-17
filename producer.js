@@ -1,77 +1,197 @@
-require("dotenv").config();
-
+// producer.js
 const express = require("express");
 const multer = require("multer");
 const amqp = require("amqplib");
 const fs = require("fs");
 const path = require("path");
+const { v4: uuidv4 } = require("uuid");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 const upload = multer({ dest: "uploads/" });
+
+// Queues / Exchange
 const QUEUE = "image_jobs";
+const RETRY_QUEUE = "image_retry_jobs";
+const DEAD_QUEUE = "dead_jobs";
+const LOG_EXCHANGE = "logs"; // fanout
 
-let channel;
-
-// Static files (frontend)
-app.use(express.static("public"));
-
-// RabbitMQ connection
-async function connectQueue() {
-  const connection = await amqp.connect("amqp://localhost");
-  channel = await connection.createChannel();
-  await channel.assertQueue(QUEUE);
-  console.log("Connected to RabbitMQ");
+// Simple persistent job store (file)
+const JOB_STORE = "jobs.json";
+function readJobs() {
+  if (!fs.existsSync(JOB_STORE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(JOB_STORE, "utf-8") || "{}");
+  } catch {
+    return {};
+  }
 }
-connectQueue();
+function writeJobs(jobs) {
+  fs.writeFileSync(JOB_STORE, JSON.stringify(jobs, null, 2));
+}
 
-// multiple files upload endpoint
-const maxUploadCount = parseInt(process.env.MAX_UPLOAD_COUNT) || 10;
+// ensure job store exists
+if (!fs.existsSync(JOB_STORE)) writeJobs({});
 
+let amqpChannel;
 
+async function connectRabbit() {
+  const conn = await amqp.connect("amqp://localhost");
+  const ch = await conn.createChannel();
 
-app.post("/upload", (req, res) => {
-  upload.array("images", maxUploadCount)(req, res, (err) => {
-    if (err) {
-      if (err instanceof multer.MulterError && err.code === "LIMIT_UNEXPECTED_FILE") {
-        return res.status(400).json({ message: `You can upload up to ${maxUploadCount} images at a time.` });
+  // queues/exchange
+  await ch.assertQueue(QUEUE, { durable: true });
+  await ch.assertQueue(RETRY_QUEUE, { durable: true });
+  await ch.assertQueue(DEAD_QUEUE, { durable: true });
+  await ch.assertExchange(LOG_EXCHANGE, "fanout", { durable: true });
+
+  // create an anonymous queue bound to logs exchange so we can consume logs
+  const qok = await ch.assertQueue("", { exclusive: true });
+  await ch.bindQueue(qok.queue, LOG_EXCHANGE, "");
+
+  // consume logs and broadcast via socket.io and update job store
+  ch.consume(qok.queue, (msg) => {
+    if (!msg) return;
+    try {
+      const log = JSON.parse(msg.content.toString());
+      // update job store
+      const jobs = readJobs();
+      if (log.jobId) {
+        jobs[log.jobId] = jobs[log.jobId] || {};
+        // merge some fields
+        jobs[log.jobId].id = log.jobId;
+        jobs[log.jobId].filename = log.filename;
+        jobs[log.jobId].status = log.status;
+        jobs[log.jobId].retries = log.retries ?? jobs[log.jobId].retries ?? 0;
+        if (log.duration) jobs[log.jobId].duration = log.duration;
+        if (log.error) jobs[log.jobId].error = log.error;
+        jobs[log.jobId].lastUpdated = log.timestamp;
+        writeJobs(jobs);
       }
-      return res.status(500).json({ message: "Upload failed.", error: err.message });
+      // broadcast to websocket clients
+      io.emit("job_log", log);
+    } catch (err) {
+      console.error("Error processing incoming log:", err);
+    } finally {
+      ch.ack(msg);
     }
-
-    const files = req.files;
-    if (!files || files.length === 0)
-      return res.status(400).json({ message: "No files uploaded." });
-
-    files.forEach((file) => {
-      const job = { path: file.path,
-        originalName: file.originalname
-      };
-      channel.sendToQueue(QUEUE, Buffer.from(JSON.stringify(job)));
-      console.log("Sent to queue:", file.path);
-    });
-
-    res.json({ message: `${files.length} image(s) queued for processing.` });
   });
+
+  amqpChannel = ch;
+  console.log("Connected to RabbitMQ and listening logs exchange");
+}
+
+connectRabbit().catch((err) => {
+  console.error("RabbitMQ connection error:", err);
+  process.exit(1);
 });
 
-
-// Listig processed images
-app.get("/processed", (req, res) => {
-  const files = fs.readdirSync("processed");
-  const images = files.map((f) => "/processed/" + f);
-  res.json(images);
-});
-
-// Reading log files endpoint
-app.get("/logs", (req, res) => {
-  if (!fs.existsSync("worker-logs.json")) return res.json([]);
-
-  const lines = fs.readFileSync("worker-logs.json", "utf-8").trim().split("\n");
-  const logs = lines.map((line) => JSON.parse(line));
-  res.json(logs);
-});
-
-// making processed folder available
+// serve static frontend
+app.use(express.static("public"));
 app.use("/processed", express.static("processed"));
 
-app.listen(3000, () => console.log(" Server running on http://localhost:3000"));
+// Upload endpoint - create job and send to queue
+app.post("/upload", upload.array("images", 20), async (req, res) => {
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: "No files" });
+
+  const jobs = readJobs();
+
+  files.forEach((file) => {
+    const jobId = uuidv4();
+    const job = {
+      jobId,
+      path: file.path,
+      originalName: file.originalname,
+      filename: path.basename(file.path),
+      originalName: file.originalname, 
+      retries: 0,
+      createdAt: new Date().toISOString(),
+    };
+
+    // store initial job record
+    jobs[jobId] = {
+      id: jobId,
+      filename: job.filename,
+      status: "queued",
+      retries: 0,
+      createdAt: job.createdAt,
+      lastUpdated: job.createdAt,
+    };
+
+    // send message to queue
+    amqpChannel.sendToQueue(QUEUE, Buffer.from(JSON.stringify(job)), {
+      persistent: true,
+    });
+
+    // also publish a "queued" log to logs exchange (so UI sees it)
+    const log = {
+      jobId,
+      filename: job.filename,
+      status: "queued",
+      retries: 0,
+      worker: null,
+      timestamp: new Date().toISOString(),
+    };
+    amqpChannel.publish(LOG_EXCHANGE, "", Buffer.from(JSON.stringify(log)));
+  });
+
+  writeJobs(jobs);
+  res.json({ message: `${files.length} file(s) queued.` });
+});
+
+// API: get recent logs via job store (polling fallback)
+app.get("/jobs", (req, res) => {
+  const jobs = readJobs();
+  // return as array sorted by lastUpdated
+  const arr = Object.values(jobs).sort((a, b) =>
+    new Date(b.lastUpdated) - new Date(a.lastUpdated)
+  );
+  res.json(arr.slice(0, 200));
+});
+
+app.get("/processed", (req, res) => {
+  const dir = "processed";
+  if (!fs.existsSync(dir)) return res.json([]);
+
+  const files = fs.readdirSync(dir); // all files in processed folder
+  const jobs = readJobs();           // load job store
+
+  const result = files.map(filename => {
+    // find the job that is related to filename in job store
+    const match = Object.values(jobs).find(j => j.filename === filename);
+
+    return {
+      url: `/processed/${filename}`,
+      filename,
+      originalName: match?.originalName || null,
+      status: match?.status || null,
+      retries: match?.retries || 0,
+    };
+  });
+
+  res.json(result);
+});
+
+
+// API: dead jobs list (filter jobs with status dead)
+app.get("/dead", (req, res) => {
+  const jobs = readJobs();
+  const dead = Object.values(jobs).filter((j) => j.status === "dead");
+  res.json(dead);
+});
+
+// socket.io connection info
+io.on("connection", (socket) => {
+  console.log("Client connected via socket.io");
+  socket.on("disconnect", () => console.log(" Client disconnected"));
+});
+
+const PORT = 3000;
+server.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});

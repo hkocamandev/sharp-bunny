@@ -108,7 +108,7 @@ app.post("/upload", upload.array("images", 20), async (req, res) => {
       path: file.path,
       originalName: file.originalname,
       filename: path.basename(file.path),
-      originalName: file.originalname, 
+      originalName: file.originalname,
       retries: 0,
       createdAt: new Date().toISOString(),
     };
@@ -143,6 +143,30 @@ app.post("/upload", upload.array("images", 20), async (req, res) => {
   writeJobs(jobs);
   res.json({ message: `${files.length} file(s) queued.` });
 });
+
+app.post("/clear-processed", (req, res) => {
+  const dir = path.join(__dirname, "processed");
+
+  fs.readdir(dir, (err, files) => {
+    if (err) return res.json({ error: err });
+
+    for (const f of files) {
+      if (f === ".gitkeep") continue;
+      fs.unlinkSync(path.join(dir, f));
+    }
+
+    res.json({ message: "Gallery cleared (except .gitkeep)" });
+  });
+});
+
+app.post("/clear-jobs", (req, res) => {
+  const jobsFile = path.join(__dirname, "jobs.json");
+  fs.writeFileSync(jobsFile, JSON.stringify([], null, 2));
+
+  res.json({ message: "Jobs cleared" });
+});
+
+
 
 // API: get recent logs via job store (polling fallback)
 app.get("/jobs", (req, res) => {

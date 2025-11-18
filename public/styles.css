@@ -1,0 +1,25 @@
+.log-item {
+    padding: 8px;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 14px;
+}
+
+.success {
+    color: #16a34a;
+}
+
+.failed {
+    color: #dc2626;
+}
+
+.processing {
+    color: #f59e0b;
+}
+
+.dead {
+    color: #7f1d1d;
+}
+
+.queued {
+    color: #6b7280;
+}

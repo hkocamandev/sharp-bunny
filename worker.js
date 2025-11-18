@@ -4,161 +4,211 @@ const sharp = require("sharp");
 const fs = require("fs");
 const path = require("path");
 
-const QUEUE = "image_jobs";
-const RETRY_QUEUE = "image_retry_jobs";
-const DEAD_QUEUE = "dead_jobs";
-const LOG_EXCHANGE = "logs";
-const WORKER_ID = process.env.WORKER_ID || Math.floor(Math.random() * 1000);
-const MAX_RETRIES = 3; // 0..2 => 3 attempts
+const CONFIG = {
+  RABBIT_URL: process.env.RABBIT_URL || "amqp://localhost",
+  HEARTBEAT: parseInt(process.env.RABBIT_HEARTBEAT, 10) || 30,
+  QUEUE: "image_jobs",
+  RETRY_QUEUE: "image_retry_jobs",
+  DEAD_QUEUE: "dead_jobs",
+  LOG_EXCHANGE: "logs",
+  WORKER_ID: process.env.WORKER_ID || Math.floor(Math.random() * 1000),
+  MAX_RETRIES: parseInt(process.env.MAX_RETRIES, 10) || 3,
+  PROCESSED_DIR: path.join(__dirname, "processed"),
+};
+
+// ensure processed dir exists
+if (!fs.existsSync(CONFIG.PROCESSED_DIR)) fs.mkdirSync(CONFIG.PROCESSED_DIR, { recursive: true });
 
 async function startWorker() {
-const connection = await amqp.connect("amqp://localhost", {
-  heartbeat: 30   // 5 yerine 30 saniye
-});
+  const connection = await amqp.connect(CONFIG.RABBIT_URL, { heartbeat: CONFIG.HEARTBEAT });
   const ch = await connection.createChannel();
 
-  connection.on("error", (err) => {
-      console.error("RabbitMQ connection error:", err);
-    });
+  connection.on("error", (err) => console.error("RabbitMQ connection error:", err));
+  connection.on("close", () => {
+    console.error("RabbitMQ closed, reconnecting in 2s...");
+    setTimeout(startWorker, 2000);
+  });
 
-    connection.on("close", () => {
-      console.error("RabbitMQ connection closed. Reconnecting...");
-      setTimeout(startWorker, 2000);
-    });
+  await ch.assertQueue(CONFIG.QUEUE, { durable: true });
+  await ch.assertQueue(CONFIG.RETRY_QUEUE, { durable: true });
+  await ch.assertQueue(CONFIG.DEAD_QUEUE, { durable: true });
+  await ch.assertExchange(CONFIG.LOG_EXCHANGE, "fanout", { durable: true });
 
-  await ch.assertQueue(QUEUE, { durable: true });
-  await ch.assertQueue(RETRY_QUEUE, { durable: true });
-  await ch.assertQueue(DEAD_QUEUE, { durable: true });
-  await ch.assertExchange(LOG_EXCHANGE, "fanout", { durable: true });
+  console.log(`Worker ${CONFIG.WORKER_ID} started`);
 
-  console.log(`Worker ${WORKER_ID} started and waiting for messages...`);
-
-  // helper to publish log
   function publishLog(payload) {
-    ch.publish(LOG_EXCHANGE, "", Buffer.from(JSON.stringify(payload)));
+    // safe publish: try/catch so worker doesn't crash if publish fails
+    try {
+      ch.publish(CONFIG.LOG_EXCHANGE, "", Buffer.from(JSON.stringify(payload)));
+    } catch (e) {
+      console.error("Failed to publish log:", e);
+    }
   }
 
-  // consume main queue
   ch.consume(
-    QUEUE,
+    CONFIG.QUEUE,
     async (msg) => {
       if (!msg) return;
-      const job = JSON.parse(msg.content.toString());
-      const { jobId, path: imagePath,originalName, retries = 0 } = job;
-      const filename = originalName || path.basename(imagePath);
-      const outputPath = `processed/${filename}`;
+      let job;
+      try {
+        job = JSON.parse(msg.content.toString());
+      } catch (e) {
+        console.error("Invalid job message, acking and skipping:", e);
+        ch.ack(msg);
+        return;
+      }
 
-      // publish processing log
+      const {
+        jobId,
+        filepath,        
+        filename,        
+        originalName,    
+        retries = 0,
+      } = job;
+
+      // decide which name to check for 'fail' token (prefer originalName)
+      const nameToCheck = (originalName || filename || "").toString();
+      // processed output filename - ensure it has an image extension frontend will accept
+      const processedFilename = (filename || path.basename(filepath || "")) + ".jpg";
+      const outputPath = path.join(CONFIG.PROCESSED_DIR, processedFilename);
+
+      // publish processing start
       publishLog({
         jobId,
-        filename,
+        filename: processedFilename,
+        originalName: originalName || null,
         status: "processing",
-        worker: WORKER_ID,
+        worker: CONFIG.WORKER_ID,
         retries,
         timestamp: new Date().toISOString(),
       });
 
       const start = Date.now();
+
       try {
-        // simulate a failure for filenames containing "fail"
-        if (filename.toLowerCase().includes("fail")) {
-          throw new Error("Simulated failure (filename contains 'fail')");
+        // Simulate failure only on FIRST attempt if originalName (or nameToCheck) contains 'fail'
+        const failFirstAttempt = nameToCheck.toLowerCase().includes("fail") && retries === 0;
+        if (failFirstAttempt) {
+          throw new Error("Simulated failure (first attempt for 'fail' filename)");
         }
 
-        // actual image processing
-        await sharp(imagePath).resize(800).toFile(outputPath);
+        // Actual image processing with sharp — write as JPEG to ensure front-end sees extension
+        await sharp(filepath)
+          .resize({
+            width: 800,
+            withoutEnlargement: true
+          })
+          .jpeg({ quality: 90 })
+          .toFile(outputPath);
+
 
         const duration = ((Date.now() - start) / 1000).toFixed(2);
 
+        // publish success (use processedFilename so producer can map)
         publishLog({
           jobId,
-          filename,
+          filename: processedFilename,
+          originalName: originalName || null,
           status: "success",
-          worker: WORKER_ID,
+          worker: CONFIG.WORKER_ID,
           duration,
           retries,
           timestamp: new Date().toISOString(),
         });
 
-        console.log(`Worker ${WORKER_ID} success: ${filename}`);
+        // cleanup uploaded file (best-effort)
+        fs.unlink(filepath, (err) => {
+          if (err) console.warn("Failed to delete uploaded file:", filepath, err.message);
+        });
+
         ch.ack(msg);
       } catch (err) {
-        console.log(`Worker ${WORKER_ID} failed: ${filename} err=${err.message}`);
-
-        const newRetries = (retries ?? 0) + 1;
+        const newRetries = (retries || 0) + 1;
+        console.log(`Worker ${CONFIG.WORKER_ID} failed: ${nameToCheck} (attempt ${newRetries}) -> ${err.message}`);
 
         publishLog({
           jobId,
-          filename,
+          filename: processedFilename,
+          originalName: originalName || null,
           status: "failed",
-          worker: WORKER_ID,
+          worker: CONFIG.WORKER_ID,
+          retries: newRetries - 1, // previous retries
           error: err.message,
-          retries,
           timestamp: new Date().toISOString(),
         });
 
-        if (newRetries >= MAX_RETRIES) {
-          // send to dead queue
-          const deadJob = { jobId, path: imagePath, retries: newRetries };
-          ch.sendToQueue(DEAD_QUEUE, Buffer.from(JSON.stringify(deadJob)), {
-            persistent: true,
-          });
+        if (newRetries >= CONFIG.MAX_RETRIES) {
+          // move to DLQ
+          ch.sendToQueue(
+            CONFIG.DEAD_QUEUE,
+            Buffer.from(JSON.stringify({ jobId, filepath, processedFilename, retries: newRetries })),
+            { persistent: true }
+          );
           publishLog({
             jobId,
-            filename,
+            filename: processedFilename,
+            originalName: originalName || null,
             status: "dead",
-            worker: WORKER_ID,
+            worker: CONFIG.WORKER_ID,
             retries: newRetries,
             timestamp: new Date().toISOString(),
           });
-          console.log(`Worker ${WORKER_ID} moved ${filename} to DLQ`);
         } else {
-          // schedule retry: push to retry queue (we can delay with setTimeout here)
-          const retryJob = { jobId, path: imagePath, retries: newRetries };
-          console.log(`🔁 Worker ${WORKER_ID} scheduling retry ${filename} attempt ${newRetries}`);
-          // small delay before requeue to avoid busy-loop
+          // schedule retry by sending into retry queue after a small delay
           setTimeout(() => {
-            ch.sendToQueue(RETRY_QUEUE, Buffer.from(JSON.stringify(retryJob)), {
-              persistent: true,
-            });
+            ch.sendToQueue(
+              CONFIG.RETRY_QUEUE,
+              Buffer.from(JSON.stringify({ ...job, retries: newRetries })),
+              { persistent: true }
+            );
             publishLog({
               jobId,
-              filename,
+              filename: processedFilename,
+              originalName: originalName || null,
               status: "retried",
-              worker: WORKER_ID,
+              worker: CONFIG.WORKER_ID,
               retries: newRetries,
               timestamp: new Date().toISOString(),
             });
-          }, 5000);
+          }, 3000);
         }
+
         ch.ack(msg);
       }
     },
     { noAck: false }
   );
 
-  // retry queue consumer: simply puts job back to main queue
+  // retry queue consumer: push back to main queue
   ch.consume(
-    RETRY_QUEUE,
+    CONFIG.RETRY_QUEUE,
     (msg) => {
       if (!msg) return;
-      const job = JSON.parse(msg.content.toString());
-      // publish to main queue
-      ch.sendToQueue(QUEUE, Buffer.from(JSON.stringify(job)), { persistent: true });
-      ch.ack(msg);
+      try {
+        const job = JSON.parse(msg.content.toString());
+        ch.sendToQueue(CONFIG.QUEUE, Buffer.from(JSON.stringify(job)), { persistent: true });
+      } catch (e) {
+        console.error("Invalid retry job:", e);
+      } finally {
+        ch.ack(msg);
+      }
     },
     { noAck: false }
   );
 
-  // optional: consumer for dead queue just logging (or you can inspect jobs via producer)
+  // dead queue logging
   ch.consume(
-    DEAD_QUEUE,
+    CONFIG.DEAD_QUEUE,
     (msg) => {
       if (!msg) return;
-      const job = JSON.parse(msg.content.toString());
-      console.log(`DLQ entry: ${job.jobId} (${path.basename(job.path)})`);
-      // ack and keep in dead queue? We'll ack so DLQ is a log channel; if you want DLQ persistent listing, you can store elsewhere.
-      ch.ack(msg);
+      try {
+        const job = JSON.parse(msg.content.toString());
+        console.log(`DLQ entry: ${job.jobId} (${job.processedFilename || path.basename(job.filepath || "")})`);
+      } catch (e) {
+        console.error("Invalid DLQ message:", e);
+      } finally {
+        ch.ack(msg);
+      }
     },
     { noAck: false }
   );

@@ -2,296 +2,100 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Image Processor + Live Logs</title>
-    <style>
-      body {
-        font-family: Arial;
-        padding: 20px;
-        background: #f6f7fb;
-      }
-      form {
-        background: white;
-        padding: 16px;
-        border-radius: 8px;
-        margin-bottom: 12px;
-        max-width: 520px;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
-      }
-      button {
-        padding: 8px 12px;
-        border-radius: 6px;
-        border: none;
-        background: #007bff;
-        color: white;
-        cursor: pointer;
-      }
-      #gallery img {
-        width: 120px;
-        margin: 6px;
-        border-radius: 6px;
-      }
-      #logs {
-        max-width: 800px;
-        background: white;
-        padding: 12px;
-        border-radius: 8px;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
-        height: 300px;
-        overflow: auto;
-      }
-      .log-item {
-        padding: 6px;
-        border-bottom: 1px solid #eee;
-      }
-      .success {
-        color: green;
-      }
-      .failed {
-        color: red;
-      }
-      .queued {
-        color: #666;
-      }
-      .processing {
-        color: orange;
-      }
-      .dead {
-        color: darkred;
-      }
-      #images {
-        display: none; /* native file input hidden */
-      }
 
-      .choose-btn,
-      .upload-btn {
-        padding: 8px 12px;
-        border-radius: 6px;
-        border: none;
-        background: #007bff;
-        color: white;
-        cursor: pointer;
-      }
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-      .choose-btn:hover,
-      .upload-btn:hover {
-        background: #005fcc;
-      }
-      .status {
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: 100%;
-        display: block;
-        padding-right: 4px;
-      }
+    <title>Image Processor Dashboard</title>
 
-      .upload-btn,
-      .clear-logs-btn,
-      .clear-gallery-btn {
-        flex-shrink: 0;
-      }
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
 
-      button,
-      .choose-btn,
-      .upload-btn,
-      .clear-btn {
-        padding: 8px 12px;
-        height: 36px;
-        line-height: 20px;
-        display: flex;
-        align-items: center;
-      }
-    </style>
+    <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
-    <h2>Image Processor Demo (Live Logs)</h2>
-    <form
-      id="uploadForm"
-      style="
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        flex-wrap: nowrap; /* ekledik */
-      "
-    >
-      <label
-        class="file-label"
-        style="display: flex; align-items: center; gap: 10px; cursor: pointer"
-      >
-        <button type="button" class="choose-btn">Choose Files</button>
-        <span id="fileText" style="font-size: 14px; color: #555"
-          >No file selected</span
-        >
-        <input
-          type="file"
-          id="images"
-          name="images"
-          multiple
-          accept="image/*"
-          required
-        />
-      </label>
 
-      <button
-        type="submit"
-        class="upload-btn"
-        style="background: green; color: black"
-      >
-        Upload
-      </button>
-      <button
-        type="button"
-        id="clearLogsBtn"
-        class="upload-btn"
-        style="background: #dc3545"
-      >
-        Clear Logs
-      </button>
-      <button
-        type="button"
-        id="clearGalleryBtn"
-        class="upload-btn"
-        style="background: #6c757d"
-      >
-        Clear Gallery
-      </button>
+  <body class="bg-gray-100 text-gray-800">
+    <div class="max-w-6xl mx-auto p-4">
+      <h1 class="text-2xl font-bold mb-6 text-center">
+        Image Processor Dashboard
+      </h1>
 
-      <span id="status"></span>
-    </form>
+      <!-- Upload Card -->
+      <div class="bg-white shadow-sm rounded-xl p-4 mb-6">
+        <form id="uploadForm" class="flex flex-wrap items-center gap-4">
+          <!-- Choose Files -->
+          <label class="flex items-center gap-3 cursor-pointer">
+            <button
+              type="button"
+              class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            >
+              Choose Files
+            </button>
 
-    <h3>Gallery</h3>
-    <div id="gallery"></div>
+            <span id="fileText" class="text-sm text-gray-600"
+              >No file selected</span
+            >
 
-    <h3>Live Logs</h3>
-    <div id="logs"></div>
+            <input
+              type="file"
+              id="images"
+              name="images"
+              multiple
+              accept="image/*"
+              class="hidden"
+            />
+          </label>
+
+          <!-- Upload -->
+          <button
+            type="submit"
+            class="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600"
+          >
+            Upload
+          </button>
+
+          <!-- Clear Logs -->
+          <button
+            type="button"
+            id="clearLogsBtn"
+            class="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
+          >
+            Clear Logs
+          </button>
+
+          <!-- Clear Gallery -->
+          <button
+            type="button"
+            id="clearGalleryBtn"
+            class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+          >
+            Clear Gallery
+          </button>
+
+          <!-- Status -->
+          <span
+            id="status"
+            class="ml-auto text-sm text-gray-700 truncate max-w-full"
+          ></span>
+        </form>
+      </div>
+
+      <!-- Gallery Section -->
+      <div class="bg-white shadow-sm rounded-xl p-4 mb-6">
+        <h2 class="text-xl font-semibold mb-3">Gallery</h2>
+        <div
+          id="gallery"
+          class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4"
+        ></div>
+      </div>
+
+      <!-- Logs Section -->
+      <div class="bg-white shadow-sm rounded-xl p-4">
+        <h2 class="text-xl font-semibold mb-3">Live Logs</h2>
+        <div id="logs" class="h-80 overflow-auto space-y-2"></div>
+      </div>
+    </div>
 
     <script src="https://cdn.socket.io/4.7.1/socket.io.min.js"></script>
-    <script>
-      const socket = io(); // connects to same origin
-      const logsDiv = document.getElementById("logs");
-      const gallery = document.getElementById("gallery");
-      const statusSpan = document.getElementById("status");
-      const form = document.getElementById("uploadForm");
-
-      const fileInput = document.getElementById("images");
-      const fileText = document.getElementById("fileText");
-
-      // live logs via socket
-      socket.on("job_log", (log) => {
-        // prepend log entry
-        const el = document.createElement("div");
-        el.className = "log-item " + (log.status || "");
-        el.innerHTML = `<b>${log.filename}</b> — <span>${(
-          log.status || ""
-        ).toUpperCase()}</span>
-              ${log.retries !== undefined ? ` - retries: ${log.retries}` : ""}
-              ${log.worker ? ` - worker: ${log.worker}` : ""}
-              ${log.duration ? ` - ${log.duration}s` : ""}
-                ${log.error ? ` - error: ${log.error}` : ""}
-              <div style="font-size:12px;color:#666">${new Date(
-                log.timestamp
-              ).toLocaleString()}</div>`;
-        logsDiv.prepend(el);
-
-        if (log.status === "success") {
-          loadGallery();
-        }
-      });
-
-      async function loadGallery() {
-        const res = await fetch("/processed");
-        const imgs = await res.json();
-
-        const imageFiles = imgs.filter((item) => {
-          const name = item.filename || item.originalName || "";
-          return /\.(png|jpg|jpeg|gif|webp)$/i.test(name);
-        });
-
-        gallery.innerHTML = imageFiles
-          .map(
-            (item) => `
-              <div style="display:inline-block; text-align:center; margin:10px;">
-                <img src="${
-                  item.url
-                }" style="width:120px; border-radius:6px;" />
-                <div style="font-size:12px; color:#555;">
-                  ${item.originalName || item.filename}
-                </div>
-              </div>
-      `
-          )
-          .join("");
-      }
-
-      async function loadJobsOnce() {
-        const res = await fetch("/jobs");
-        const jobs = await res.json();
-        // show last 10 in logsDiv initially
-        jobs.slice(0, 10).forEach((j) => {
-          const el = document.createElement("div");
-          el.className = "log-item " + (j.status || "");
-          el.innerHTML = `<b>${j.filename}</b> — <span>${(
-            j.status || ""
-          ).toUpperCase()}</span>
-          ${j.retries !== undefined ? ` - retries: ${j.retries}` : ""}
-          <div style="font-size:12px;color:#666">${new Date(
-            j.lastUpdated
-          ).toLocaleString()}</div>`;
-          logsDiv.prepend(el);
-        });
-      }
-
-      document.querySelector(".choose-btn").addEventListener("click", () => {
-        fileInput.click();
-      });
-      document
-        .getElementById("clearLogsBtn")
-        .addEventListener("click", async () => {
-          logsDiv.innerHTML = "";
-
-          await fetch("/clear-jobs", { method: "POST" }).catch((err) =>
-            console.error("Clear jobs error:", err)
-          );
-
-          location.reload();
-        });
-
-      document
-        .getElementById("clearGalleryBtn")
-        .addEventListener("click", async () => {
-          gallery.innerHTML = "";
-
-          await fetch("/clear-processed", { method: "POST" }).catch((err) =>
-            console.error("Clear gallery error:", err)
-          );
-
-          alert("Gallery cleared");
-        });
-
-      fileInput.addEventListener("change", () => {
-        if (fileInput.files.length === 0) {
-          fileText.textContent = "No file selected";
-        } else {
-          fileText.textContent = `${fileInput.files.length} file(s) selected`;
-        }
-      });
-
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const files = document.getElementById("images").files;
-        if (!files.length) return alert("Select files");
-        const fd = new FormData();
-        for (let f of files) fd.append("images", f);
-        statusSpan.textContent = "Uploading...";
-        const r = await fetch("/upload", { method: "POST", body: fd });
-        const data = await r.json();
-        statusSpan.textContent = data.message;
-        setTimeout(() => (statusSpan.textContent = ""), 3000);
-        loadGallery();
-      });
-
-      loadJobsOnce();
-      loadGallery();
-    </script>
+    <script src="/main.js"></script>
   </body>
 </html>

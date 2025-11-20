@@ -1,6 +1,5 @@
 // producer.js
 // Express server + RabbitMQ publisher/consumer for logs + socket.io + job store
-// CommonJS style to match your project
 
 const express = require("express");
 const multer = require("multer");
@@ -10,6 +9,8 @@ const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const http = require("http");
 const { Server } = require("socket.io");
+const sharp = require("sharp");
+
 
 ///////////////////////
 // CONFIG / CONSTANTS
@@ -21,18 +22,43 @@ const CONFIG = {
   RETRY_QUEUE: "image_retry_jobs",
   DEAD_QUEUE: "dead_jobs",
   LOG_EXCHANGE: "logs", // fanout
+  WATERMARK_QUEUE: "watermark_jobs",
   JOB_STORE: path.join(__dirname, "jobs.json"),
   UPLOAD_DIR: path.join(__dirname, "uploads"),
   PROCESSED_DIR: path.join(__dirname, "processed"),
+  WATERMARKED_DIR: path.join(__dirname, "watermarked"),
   MAX_UPLOAD: parseInt(process.env.MAX_UPLOAD_COUNT, 10) || 20,
+
 };
+
+// utils
+function sanitizeBaseName(name = "") {
+  // remove extension, normalize, keep alphanumeric and dashes/underscores
+  const base = String(name)
+    .replace(/\.[^/.]+$/, "")         // drop extension
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")         // remove symbols
+    .trim()
+    .replace(/\s+/g, "-");            // spaces -> dashes
+  return base || "file";
+}
+
+function shortId(id) {
+  return String(id || "").replace(/-/g, "").slice(0, 8);
+}
 
 ///////////////////////
 // Ensure folders & job store exist
 ///////////////////////
 if (!fs.existsSync(CONFIG.UPLOAD_DIR)) fs.mkdirSync(CONFIG.UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(CONFIG.PROCESSED_DIR)) fs.mkdirSync(CONFIG.PROCESSED_DIR, { recursive: true });
+if (!fs.existsSync(CONFIG.WATERMARKED_DIR)) fs.mkdirSync(CONFIG.WATERMARKED_DIR, { recursive: true });
 if (!fs.existsSync(CONFIG.JOB_STORE)) fs.writeFileSync(CONFIG.JOB_STORE, JSON.stringify({}, null, 2));
+CONFIG.WATERMARK_QUEUE = process.env.WATERMARK_QUEUE || "watermark_jobs";
+CONFIG.WATERMARKED_DIR = path.join(__dirname, "watermarked");
+if (!fs.existsSync(CONFIG.WATERMARKED_DIR)) fs.mkdirSync(CONFIG.WATERMARKED_DIR, { recursive: true });
+
 
 ///////////////////////
 // Job store helpers (atomic write)
@@ -64,7 +90,11 @@ const io = new Server(server);
 const upload = multer({ dest: CONFIG.UPLOAD_DIR });
 
 app.use(express.static(path.join(__dirname, "public")));
+// serve processed and watermarked directories
 app.use("/processed", express.static(CONFIG.PROCESSED_DIR));
+app.use("/watermarked", express.static(CONFIG.WATERMARKED_DIR));
+
+
 
 ///////////////////////
 // RabbitMQ connection & log consumer (subscribe to logs exchange)
@@ -89,6 +119,8 @@ async function connectRabbit() {
     await ch.assertQueue(CONFIG.QUEUE, { durable: true });
     await ch.assertQueue(CONFIG.RETRY_QUEUE, { durable: true });
     await ch.assertQueue(CONFIG.DEAD_QUEUE, { durable: true });
+    await ch.assertQueue(CONFIG.WATERMARK_QUEUE, { durable: true });
+
     await ch.assertExchange(CONFIG.LOG_EXCHANGE, "fanout", { durable: true });
 
     // create anonymous queue for logs, bind to exchange
@@ -183,8 +215,14 @@ app.post(
     }
 
     const jobs = readJobs();
+    const existingFiles = new Set(fs.readdirSync(CONFIG.PROCESSED_DIR).map(f => f.toLowerCase()));
 
     for (const file of files) {
+      if (existingFiles.has(file.originalname.toLowerCase())) {
+        console.log(`Skipping already uploaded file: ${file.originalname}`);
+        fs.unlinkSync(file.path); // delete temp file
+        continue; // next file
+      }
       const jobId = uuidv4();
       const job = {
         jobId,
@@ -234,19 +272,103 @@ app.post(
 
 // Clear processed (keep .gitkeep)
 app.post("/clear-processed", (req, res) => {
-  const dir = CONFIG.PROCESSED_DIR;
   try {
-    const files = fs.readdirSync(dir);
-    for (const f of files) {
-      if (f === ".gitkeep") continue;
-      const p = path.join(dir, f);
-      if (fs.statSync(p).isFile()) fs.unlinkSync(p);
+    const dirs = [CONFIG.PROCESSED_DIR, CONFIG.WATERMARKED_DIR];
+    for (const dir of dirs) {
+      if (!fs.existsSync(dir)) continue;
+      const files = fs.readdirSync(dir);
+      for (const f of files) {
+        if (f === ".gitkeep") continue;
+        const p = path.join(dir, f);
+        if (fs.statSync(p).isFile()) fs.unlinkSync(p);
+      }
     }
-    res.json({ message: "Gallery cleared (except .gitkeep)" });
+    res.json({ message: "Gallery cleared (processed + watermarked, except .gitkeep)" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+///////////////////////
+// add-watermark endpoint
+// Scans processed/ and enqueues watermark jobs only for not-yet-watermarked images
+///////////////////////
+app.post("/add-watermark", async (req, res) => {
+  try {
+    if (!fs.existsSync(CONFIG.PROCESSED_DIR)) return res.status(400).json({ error: "No processed images available." });
+
+    const processedFiles = fs.readdirSync(CONFIG.PROCESSED_DIR).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f));
+    if (!processedFiles.length) return res.status(400).json({ error: "No processed images found." });
+
+    const jobs = readJobs();
+    let enqueued = 0;
+
+    for (const fname of processedFiles) {
+      const ext = path.extname(fname);
+      const base = path.basename(fname, ext);
+      const wmName = `${base}_wm${ext}`;
+      const wmPath = path.join(CONFIG.WATERMARKED_DIR, wmName);
+
+      // skip if already watermarked file exists
+      if (fs.existsSync(wmPath)) continue;
+
+      const jobId = uuidv4();
+      const job = {
+        jobId,
+        processedPath: path.join(CONFIG.PROCESSED_DIR, fname),
+        processedFilename: fname,
+        watermarkedFilename: wmName,
+        originalName: (() => {
+          // try to find job record that created the processed file
+          const match = Object.values(jobs).find(j => j.processedFilename === fname || j.filename === fname);
+          return match?.originalName || null;
+        })(),
+        retries: 0,
+        createdAt: new Date().toISOString(),
+      };
+
+      // ensure watermark queue declared (we did earlier in connectRabbit ideally)
+      if (amqpChannel) {
+        amqpChannel.sendToQueue(CONFIG.WATERMARK_QUEUE, Buffer.from(JSON.stringify(job)), { persistent: true });
+        const log = {
+          jobId,
+          filename: wmName,
+          originalName: job.originalName || fname,
+          status: "queued",
+          retries: 0,
+          worker: null,
+          timestamp: new Date().toISOString(),
+        };
+        amqpChannel.publish(CONFIG.LOG_EXCHANGE, "", Buffer.from(JSON.stringify(log)));
+      }
+
+      jobs[jobId] = {
+        id: jobId,
+        filename: wmName,
+        originalName: job.originalName || fname,
+        status: "queued",
+        retries: 0,
+        createdAt: job.createdAt,
+        lastUpdated: job.createdAt,
+        processedFilename: fname,
+        watermarkedFilename: wmName,
+      };
+
+      enqueued++;
+    }
+
+    writeJobs(jobs);
+    return res.json({ enqueued, message: `${enqueued} file(s) enqueued for watermark.` });
+  } catch (err) {
+    console.error("add-watermark error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+
 
 // Clear jobs (reset job store)
 app.post("/clear-jobs", (req, res) => {
@@ -267,33 +389,62 @@ app.get("/jobs", (req, res) => {
 
 // processed list with originalName mapping
 app.get("/processed", (req, res) => {
-  const dir = CONFIG.PROCESSED_DIR;
-  if (!fs.existsSync(dir)) return res.json([]);
-
-  const files = fs.readdirSync(dir);
   const jobs = readJobs();
 
-  const result = files
-    .filter((f) => /\.(png|jpe?g|gif|webp|svg)$/i.test(f))
-    .map((filename) => {
-      const match = Object.values(jobs).find((j) => {
-        return (
-          j.filename === filename ||       
-          j.originalName === filename ||   
-          j.processedFilename === filename 
-        );
-      });
+  const processedFiles = fs.existsSync(CONFIG.PROCESSED_DIR)
+    ? fs.readdirSync(CONFIG.PROCESSED_DIR).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f))
+    : [];
 
-      return {
-        url: `/processed/${filename}`,
-        filename,
-        originalName: match?.originalName ?? filename,
-        status: match?.status ?? null,
-        retries: match?.retries ?? 0,
-      };
+  const watermarkedFiles = fs.existsSync(CONFIG.WATERMARKED_DIR)
+    ? fs.readdirSync(CONFIG.WATERMARKED_DIR).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f))
+    : [];
+
+  const map = new Map();
+
+  // helper to infer original name from processed filename when job entry missing
+  function inferOriginalFromProcessed(fname) {
+    // aim: "cat001-93c551a4.jpg" -> "cat001.jpg"
+    const ext = path.extname(fname);
+    const base = path.basename(fname, ext);
+    // remove trailing -<shortid> if present
+    const maybe = base.replace(/-[0-9a-f]{6,}$/i, "");
+    return `${maybe}${ext}`;
+  }
+
+  // 1) add processed files
+  for (const f of processedFiles) {
+    const match = Object.values(jobs).find(j => j.processedFilename === f || j.filename === f);
+    const original = match?.originalName || inferOriginalFromProcessed(f);
+    map.set(original, {
+      url: `/processed/${f}`,   // served from processed directory
+      filename: f,
+      originalName: original,
+      status: match?.status || "processed",
+    });
+  }
+
+  // 2) overlay watermarked files (take precedence)
+  for (const wf of watermarkedFiles) {
+    // assume watermarked name pattern: <processed-base>_wm.ext  OR maybe <processed-base>-<id>_wm.ext
+    const ext = path.extname(wf);
+    const base = path.basename(wf, ext).replace(/_wm$/, ""); // remove _wm if present
+    // find job that produced processed file whose basename matches 'base'
+    const match = Object.values(jobs).find(j => {
+      const pf = (j.processedFilename || j.filename || "").replace(/\.[^/.]+$/, "");
+      return pf === base || pf.startsWith(base);
     });
 
-  res.json(result);
+    const original = match?.originalName || `${base}${ext}`;
+    // serve watermarked files via /watermarked route
+    map.set(original, {
+      url: `/watermarked/${wf}`,
+      filename: wf,
+      originalName: original,
+      status: match?.status || "watermarked",
+    });
+  }
+
+  res.json(Array.from(map.values()));
 });
 
 

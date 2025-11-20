@@ -19,7 +19,9 @@ yarn-error.log*
 # Ignore all files inside these folders
 uploads/*
 processed/*
+watermarked/*
 
 # But keep the folders themselves (and the .gitkeep marker)
 !uploads/.gitkeep
 !processed/.gitkeep
+!watermarked/.gitkeep

@@ -4,7 +4,8 @@
   "description": "Image processing framework with rabbitmq",
   "main": "producer.js",
   "scripts": {
-    "start": "node producer.js"
+    "start": "node producer.js",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "amqplib": "^0.10.9",
